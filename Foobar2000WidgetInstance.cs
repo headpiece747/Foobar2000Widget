@@ -13,12 +13,8 @@ using System.Windows.Controls;
 using WigiDashWidgetFramework;
 using WigiDashWidgetFramework.WidgetUtility;
 
-// Dummy PlaybackState enum and PlayerState classes (if not defined elsewhere)
-public enum PlaybackState { stopped, playing, paused }
-public class PlayerState { public ActiveItem ActiveItem { get; set; } public PlaybackState PlaybackState { get; set; } }
-public class ActiveItem { public string PlaylistId { get; set; } public int Index { get; set; } public System.Collections.Generic.List<string> Columns { get; set; } }
-public class GetPlayerStateResponse { public PlayerState Player { get; set; } }
-
+// Use the official models from BeefwebApiModels.cs
+// Note: We are in the same namespace, so no using directive is needed.
 
 namespace Foobar2000Widget
 {
@@ -31,11 +27,12 @@ namespace Foobar2000Widget
         public IWidgetManager WidgetManager { get; set; }
         private readonly HttpClient _httpClient;
         private CancellationTokenSource _updateCts;
+        private readonly SemaphoreSlim _updateSemaphore = new SemaphoreSlim(1, 1);
         private string _beefwebApiUrl = "http://localhost:8880/api";
         private bool _settingsLoaded;
         private bool _disposed;
 
-        private PlayerState _currentPlayerState;
+        private PlayerState _currentPlayerState; // This will now be the full PlayerState from BeefwebApiModels
         private string _currentTrackId = string.Empty;
         private Bitmap _currentAlbumArt;
         private Bitmap _prevIcon, _playIcon, _pauseIcon, _nextIcon;
@@ -256,14 +253,17 @@ namespace Foobar2000Widget
         {
             if (_disposed || cancellationToken.IsCancellationRequested) return;
 
-            if (string.IsNullOrEmpty(_beefwebApiUrl))
-            {
-                WidgetManager?.WriteLogMessage(this, LogLevel.WARN, "Beefweb API URL is not configured. Cannot update widget.");
-                return;
-            }
-
+            await _updateSemaphore.WaitAsync(cancellationToken);
             try
             {
+                if (_disposed || cancellationToken.IsCancellationRequested) return;
+
+                if (string.IsNullOrEmpty(_beefwebApiUrl))
+                {
+                    WidgetManager?.WriteLogMessage(this, LogLevel.WARN, "Beefweb API URL is not configured. Cannot update widget.");
+                    return;
+                }
+
                 await GetPlayerStateAsync(cancellationToken);
 
                 if (cancellationToken.IsCancellationRequested) return;
@@ -322,12 +322,16 @@ namespace Foobar2000Widget
                 WidgetManager?.WriteLogMessage(this, LogLevel.ERROR, $"Unexpected error updating widget: {ex.ToString()}");
                 _currentWidgetBackgroundColor = Color.Black;
             }
+            finally
+            {
+                _updateSemaphore.Release();
+            }
         }
 
         private string GenerateTrackIdentifier()
         {
             if (_currentPlayerState?.ActiveItem == null) return string.Empty;
-            var activeItem = _currentPlayerState.ActiveItem;
+            var activeItem = _currentPlayerState.ActiveItem; // This is now ActiveItemInfo
             var columns = activeItem.Columns;
             string meta = string.Empty;
             if (columns != null && columns.Count > 0)
@@ -352,8 +356,8 @@ namespace Foobar2000Widget
                 string json = await response.Content.ReadAsStringAsync();
                 if (cancellationToken.IsCancellationRequested) return;
 
-                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-                var playerResponse = JsonSerializer.Deserialize<GetPlayerStateResponse>(json, options);
+                // Use the official model from BeefwebApiModels.cs
+                var playerResponse = JsonSerializer.Deserialize<GetPlayerStateResponse>(json);
                 _currentPlayerState = playerResponse?.Player;
 
                 if (_currentPlayerState?.ActiveItem?.Columns != null)
@@ -482,74 +486,109 @@ namespace Foobar2000Widget
             }
         }
 
+        private struct WidgetLayout
+        {
+            public Rectangle AlbumArtRect { get; set; }
+            public RectangleF TitleRect { get; set; }
+            public RectangleF ArtistRect { get; set; }
+            public RectangleF AlbumRect { get; set; }
+            public Rectangle PrevButtonRect { get; set; }
+            public Rectangle PlayPauseButtonRect { get; set; }
+            public Rectangle NextButtonRect { get; set; }
+            public StringFormat TextFormat { get; set; }
+        }
+
+        private WidgetLayout CalculateLayout()
+        {
+            var layout = new WidgetLayout();
+            Size size = WidgetSize.ToSize();
+            if (size.Width <= 0 || size.Height <= 0) return layout;
+
+            int padding = 10;
+            int availableWidthForArt = size.Width - (2 * padding);
+            int availableHeightForArt = size.Height - (2 * padding);
+            int albumArtSide = Math.Min(availableWidthForArt, availableHeightForArt);
+            albumArtSide = Math.Max(0, albumArtSide);
+
+            layout.AlbumArtRect = new Rectangle(padding, padding, albumArtSide, albumArtSide);
+
+            int textX = layout.AlbumArtRect.Right + padding;
+            int textWidth = size.Width - textX - padding;
+            textWidth = Math.Max(0, textWidth);
+
+            layout.TextFormat = new StringFormat
+            {
+                Trimming = StringTrimming.EllipsisCharacter,
+                FormatFlags = StringFormatFlags.NoWrap
+            };
+
+            if (textWidth > 0)
+            {
+                using (var titleFont = new Font("Arial", 24, FontStyle.Bold))
+                using (var infoFont = new Font("Arial", 20))
+                {
+                    int titleFontHeight = titleFont.Height;
+                    int infoFontHeight = infoFont.Height;
+                    int textBlockHeight = titleFontHeight + infoFontHeight * 2 + 10;
+
+                    int albumCenterY = layout.AlbumArtRect.Top + layout.AlbumArtRect.Height / 2;
+                    int textBlockTopY = albumCenterY - textBlockHeight / 2;
+                    textBlockTopY = Math.Max(textBlockTopY, padding);
+
+                    int estimatedMaxTextTopY = size.Height - padding - textBlockHeight - 60;
+                    textBlockTopY = Math.Min(textBlockTopY, Math.Max(padding, estimatedMaxTextTopY));
+
+                    int currentTextY = textBlockTopY;
+                    layout.TitleRect = new RectangleF(textX, currentTextY, textWidth, titleFontHeight);
+                    currentTextY += titleFontHeight + 5;
+                    layout.ArtistRect = new RectangleF(textX, currentTextY, textWidth, infoFontHeight);
+                    currentTextY += infoFontHeight + 5;
+                    layout.AlbumRect = new RectangleF(textX, currentTextY, textWidth, infoFontHeight);
+                }
+
+                int btnIconSize = 48;
+                int btnSpacing = 10;
+                int gapAboveBottomPadding = 15;
+
+                int buttonsTopY = size.Height - padding - btnIconSize - gapAboveBottomPadding;
+                buttonsTopY = Math.Max(padding, buttonsTopY);
+
+                int totalButtonsWidthNeeded = (3 * btnIconSize) + (2 * btnSpacing);
+                int buttonsStartX = textX;
+                if (totalButtonsWidthNeeded < textWidth)
+                {
+                    buttonsStartX = textX + (textWidth - totalButtonsWidthNeeded) / 2;
+                }
+                buttonsStartX = Math.Max(textX, buttonsStartX);
+                buttonsStartX = Math.Max(padding, buttonsStartX);
+
+                layout.PrevButtonRect = new Rectangle(buttonsStartX, buttonsTopY, btnIconSize, btnIconSize);
+                layout.PlayPauseButtonRect = new Rectangle(layout.PrevButtonRect.Right + btnSpacing, buttonsTopY, btnIconSize, btnIconSize);
+                layout.NextButtonRect = new Rectangle(layout.PlayPauseButtonRect.Right + btnSpacing, buttonsTopY, btnIconSize, btnIconSize);
+            }
+
+            return layout;
+        }
+
         public void ClickEvent(ClickType click_type, int x, int y)
         {
             if (click_type != ClickType.Single || _disposed) return;
 
-            Size widgetActualSize = WidgetSize.ToSize();
-            if (widgetActualSize.Width <= 0 || widgetActualSize.Height <= 0) return;
+            var layout = CalculateLayout();
+            if (layout.AlbumArtRect.Width <= 0) return; // Layout is not valid
 
-            Font titleFont = null; // Not used for button positioning here, but kept for consistency
-            Font infoFont = null;  // Not used for button positioning here, but kept for consistency
-
-            try
+            Point click = new Point(x, y);
+            if (layout.PrevButtonRect.Contains(click))
             {
-                // titleFont and infoFont are initialized but not directly used for button layout calculations in this specific block.
-                // Their presence might be relevant if text layout influenced button positions more directly.
-                titleFont = new Font("Arial", 24, FontStyle.Bold);
-                infoFont = new Font("Arial", 20);
-
-                int padding = 10;
-
-                int availableWidthForArt = widgetActualSize.Width - (2 * padding);
-                int availableHeightForArt = widgetActualSize.Height - (2 * padding);
-                int albumArtSideClick = Math.Min(availableWidthForArt, availableHeightForArt);
-                albumArtSideClick = Math.Max(0, albumArtSideClick);
-
-                Rectangle albumRectClick = new Rectangle(padding, padding, albumArtSideClick, albumArtSideClick);
-
-                int textXClick = albumRectClick.Right + padding;
-                int textWidthClick = widgetActualSize.Width - textXClick - padding;
-                textWidthClick = Math.Max(0, textWidthClick);
-
-                if (textWidthClick > 0)
-                {
-                    int btnIconSize = 48;
-                    int btnSpacing = 10;
-
-                    int buttonsTopClickY;
-                    int gapAboveBottomPadding = 15;
-
-                    buttonsTopClickY = widgetActualSize.Height - padding - btnIconSize - gapAboveBottomPadding;
-                    buttonsTopClickY = Math.Max(padding, buttonsTopClickY);
-
-                    // MODIFIED: Center the buttons horizontally
-                    int totalButtonsWidthNeeded = (3 * btnIconSize) + (2 * btnSpacing);
-                    int buttonsStartClickX = textXClick; // Default to left of text area
-                    if (totalButtonsWidthNeeded < textWidthClick)
-                    {
-                        // Center within the available textWidthClick area
-                        buttonsStartClickX = textXClick + (textWidthClick - totalButtonsWidthNeeded) / 2;
-                    }
-                    // Ensure buttons don't go left of the designated text area start or global padding
-                    buttonsStartClickX = Math.Max(textXClick, buttonsStartClickX);
-                    buttonsStartClickX = Math.Max(padding, buttonsStartClickX);
-
-
-                    Rectangle prevRect = new Rectangle(buttonsStartClickX, buttonsTopClickY, btnIconSize, btnIconSize);
-                    Rectangle playPauseRect = new Rectangle(prevRect.Right + btnSpacing, buttonsTopClickY, btnIconSize, btnIconSize);
-                    Rectangle nextRect = new Rectangle(playPauseRect.Right + btnSpacing, buttonsTopClickY, btnIconSize, btnIconSize);
-
-                    Point click = new Point(x, y);
-                    if (prevRect.Contains(click)) _ = SendPlayerCommandAsync("previous", "Previous");
-                    else if (playPauseRect.Contains(click)) _ = SendPlayerCommandAsync("play-pause", "Play/Pause");
-                    else if (nextRect.Contains(click)) _ = SendPlayerCommandAsync("next", "Next");
-                }
+                _ = SendPlayerCommandAsync("previous", "Previous");
             }
-            finally
+            else if (layout.PlayPauseButtonRect.Contains(click))
             {
-                titleFont?.Dispose();
-                infoFont?.Dispose();
+                _ = SendPlayerCommandAsync("play-pause", "Play/Pause");
+            }
+            else if (layout.NextButtonRect.Contains(click))
+            {
+                _ = SendPlayerCommandAsync("next", "Next");
             }
         }
 
@@ -563,125 +602,62 @@ namespace Foobar2000Widget
             }
             Bitmap bitmap = new Bitmap(size.Width, size.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
 
-            Font titleFont = null;
-            Font infoFont = null;
-            StringFormat sfNoArt = null;
-            StringFormat textEllipsisFormat = null; // MODIFIED: Declare StringFormat for ellipsis
-
-            try
+            var layout = CalculateLayout();
+            if (layout.AlbumArtRect.Width <= 0)
             {
-                titleFont = new Font("Arial", 24, FontStyle.Bold);
-                infoFont = new Font("Arial", 20);
-                // MODIFIED: Initialize StringFormat for ellipsis
-                textEllipsisFormat = new StringFormat
+                bitmap.Dispose();
+                return null; // Invalid layout
+            }
+
+            using (Font titleFont = new Font("Arial", 24, FontStyle.Bold))
+            using (Font infoFont = new Font("Arial", 20))
+            using (Graphics g = Graphics.FromImage(bitmap))
+            using (StringFormat textFormat = layout.TextFormat)
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                g.Clear(_currentWidgetBackgroundColor);
+
+                Brush textBrush = _currentWidgetBackgroundColor.GetBrightness() > 0.65 ? Brushes.Black : Brushes.White;
+
+                // Draw Album Art (or placeholder)
+                if (_currentAlbumArt != null)
                 {
-                    Trimming = StringTrimming.EllipsisCharacter,
-                    FormatFlags = StringFormatFlags.NoWrap
-                };
-
-
-                using (Graphics g = Graphics.FromImage(bitmap))
+                    g.DrawImage(_currentAlbumArt, layout.AlbumArtRect);
+                }
+                else
                 {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-
-                    g.Clear(_currentWidgetBackgroundColor);
-
-                    Brush textBrushWhite = Brushes.White;
-                    float brightness = _currentWidgetBackgroundColor.GetBrightness();
-                    if (brightness > 0.65)
+                    using (var placeholderBrush = new SolidBrush(Color.FromArgb(100, 128, 128, 128)))
                     {
-                        textBrushWhite = Brushes.Black;
+                        g.FillRectangle(placeholderBrush, layout.AlbumArtRect);
                     }
-
-                    int padding = 10;
-
-                    int availableWidthForArt = size.Width - (2 * padding);
-                    int availableHeightForArt = size.Height - (2 * padding);
-                    int albumArtSide = Math.Min(availableWidthForArt, availableHeightForArt);
-                    albumArtSide = Math.Max(0, albumArtSide);
-
-                    Rectangle albumRect = new Rectangle(padding, padding, albumArtSide, albumArtSide);
-
-                    if (_currentAlbumArt != null)
+                    using (var sfNoArt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     {
-                        if (albumRect.Width > 0 && albumRect.Height > 0)
-                            g.DrawImage(_currentAlbumArt, albumRect);
-                    }
-                    else
-                    {
-                        if (albumRect.Width > 0 && albumRect.Height > 0)
-                        {
-                            using (SolidBrush placeholderBrush = new SolidBrush(Color.FromArgb(100, 128, 128, 128)))
-                            {
-                                g.FillRectangle(placeholderBrush, albumRect);
-                            }
-                            sfNoArt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                            g.DrawString("No Art", infoFont, textBrushWhite, albumRect, sfNoArt);
-                        }
-                    }
-
-                    int textX = albumRect.Right + padding;
-                    int textWidth = size.Width - textX - padding;
-                    textWidth = Math.Max(0, textWidth);
-
-                    if (textWidth > 0)
-                    {
-                        int titleFontHeight = titleFont.Height;
-                        int infoFontHeight = infoFont.Height;
-                        int textBlockHeight = titleFontHeight + infoFontHeight * 2 + 10; // Approximate height for 3 lines of text with some spacing
-
-                        int albumCenterY = albumRect.Top + albumRect.Height / 2;
-                        int textBlockTopY = albumCenterY - textBlockHeight / 2;
-                        // Ensure textBlockTopY doesn't go above the top padding, or too low if album art is very small
-                        textBlockTopY = Math.Max(textBlockTopY, padding);
-                        // Ensure the text block doesn't start so low that it would certainly overflow, especially with controls below.
-                        // This is a heuristic; actual available height for text depends on button placement too.
-                        int estimatedMaxTextTopY = size.Height - padding - textBlockHeight - 60; // 60 is a rough estimate for buttons area
-                        textBlockTopY = Math.Min(textBlockTopY, Math.Max(padding, estimatedMaxTextTopY));
-
-
-                        int currentTextY = textBlockTopY;
-                        // MODIFIED: Use textEllipsisFormat for drawing strings
-                        g.DrawString(_currentTitle ?? "Unknown Title", titleFont, textBrushWhite, new RectangleF(textX, currentTextY, textWidth, titleFontHeight), textEllipsisFormat);
-                        currentTextY += titleFontHeight + 5;
-                        g.DrawString(_currentArtist ?? "Unknown Album Artist", infoFont, textBrushWhite, new RectangleF(textX, currentTextY, textWidth, infoFontHeight), textEllipsisFormat);
-                        currentTextY += infoFontHeight + 5;
-                        g.DrawString(_currentAlbum ?? "Unknown Album", infoFont, textBrushWhite, new RectangleF(textX, currentTextY, textWidth, infoFontHeight), textEllipsisFormat);
-
-                        int btnIconSize = 48;
-                        int btnSpacing = 10;
-
-                        int buttonsTopDrawY;
-                        int gapAboveBottomPadding = 15;
-
-                        buttonsTopDrawY = size.Height - padding - btnIconSize - gapAboveBottomPadding;
-                        buttonsTopDrawY = Math.Max(padding, buttonsTopDrawY);
-
-                        // MODIFIED: Center the buttons horizontally
-                        int totalButtonsWidthNeeded = (3 * btnIconSize) + (2 * btnSpacing);
-                        int buttonsStartDrawX = textX; // Default to left of text area
-                        if (totalButtonsWidthNeeded < textWidth)
-                        {
-                            // Center within the available textWidth area
-                            buttonsStartDrawX = textX + (textWidth - totalButtonsWidthNeeded) / 2;
-                        }
-                        // Ensure buttons don't go left of the designated text area start or global padding
-                        buttonsStartDrawX = Math.Max(textX, buttonsStartDrawX);
-                        buttonsStartDrawX = Math.Max(padding, buttonsStartDrawX);
-
-
-                        Rectangle prevRect = new Rectangle(buttonsStartDrawX, buttonsTopDrawY, btnIconSize, btnIconSize);
-                        Rectangle playPauseRect = new Rectangle(prevRect.Right + btnSpacing, buttonsTopDrawY, btnIconSize, btnIconSize);
-                        Rectangle nextRect = new Rectangle(playPauseRect.Right + btnSpacing, buttonsTopDrawY, btnIconSize, btnIconSize);
-
-                        if (_prevIcon != null && prevRect.Width > 0 && prevRect.Height > 0 && prevRect.Right <= size.Width - padding) g.DrawImage(_prevIcon, prevRect);
-                        Bitmap currentPlayPauseIcon = (_currentPlayerState?.PlaybackState == PlaybackState.playing ? _pauseIcon : _playIcon);
-                        if (currentPlayPauseIcon != null && playPauseRect.Width > 0 && playPauseRect.Height > 0 && playPauseRect.Right <= size.Width - padding) g.DrawImage(currentPlayPauseIcon, playPauseRect);
-                        if (_nextIcon != null && nextRect.Width > 0 && nextRect.Height > 0 && nextRect.Right <= size.Width - padding) g.DrawImage(_nextIcon, nextRect);
+                        g.DrawString("No Art", infoFont, textBrush, layout.AlbumArtRect, sfNoArt);
                     }
                 }
+
+                // Draw Text
+                if (layout.TitleRect.Width > 0)
+                {
+                    g.DrawString(_currentTitle ?? "Unknown Title", titleFont, textBrush, layout.TitleRect, textFormat);
+                    g.DrawString(_currentArtist ?? "Unknown Album Artist", infoFont, textBrush, layout.ArtistRect, textFormat);
+                    g.DrawString(_currentAlbum ?? "Unknown Album", infoFont, textBrush, layout.AlbumRect, textFormat);
+                }
+
+                // Draw Buttons
+                if (layout.PrevButtonRect.Width > 0)
+                {
+                    if (_prevIcon != null) g.DrawImage(_prevIcon, layout.PrevButtonRect);
+
+                    Bitmap currentPlayPauseIcon = (_currentPlayerState?.PlaybackState == PlaybackState.playing ? _pauseIcon : _playIcon);
+                    if (currentPlayPauseIcon != null) g.DrawImage(currentPlayPauseIcon, layout.PlayPauseButtonRect);
+
+                    if (_nextIcon != null) g.DrawImage(_nextIcon, layout.NextButtonRect);
+                }
+
                 return bitmap;
             }
             catch (Exception ex)
@@ -689,13 +665,6 @@ namespace Foobar2000Widget
                 WidgetManager?.WriteLogMessage(this, LogLevel.ERROR, $"Error during DrawWidget: {ex.ToString()}");
                 bitmap?.Dispose();
                 return null;
-            }
-            finally
-            {
-                titleFont?.Dispose();
-                infoFont?.Dispose();
-                sfNoArt?.Dispose();
-                textEllipsisFormat?.Dispose(); // MODIFIED: Dispose of StringFormat
             }
         }
     }
