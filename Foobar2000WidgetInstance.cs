@@ -609,56 +609,59 @@ namespace Foobar2000Widget
                 return null; // Invalid layout
             }
 
-            using (Font titleFont = new Font("Arial", 24, FontStyle.Bold))
-            using (Font infoFont = new Font("Arial", 20))
-            using (Graphics g = Graphics.FromImage(bitmap))
-            using (StringFormat textFormat = layout.TextFormat)
+            try
             {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-
-                g.Clear(_currentWidgetBackgroundColor);
-
-                Brush textBrush = _currentWidgetBackgroundColor.GetBrightness() > 0.65 ? Brushes.Black : Brushes.White;
-
-                // Draw Album Art (or placeholder)
-                if (_currentAlbumArt != null)
+                using (Font titleFont = new Font("Arial", 24, FontStyle.Bold))
+                using (Font infoFont = new Font("Arial", 20))
+                using (Graphics g = Graphics.FromImage(bitmap))
+                using (StringFormat textFormat = layout.TextFormat)
                 {
-                    g.DrawImage(_currentAlbumArt, layout.AlbumArtRect);
-                }
-                else
-                {
-                    using (var placeholderBrush = new SolidBrush(Color.FromArgb(100, 128, 128, 128)))
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                    g.Clear(_currentWidgetBackgroundColor);
+
+                    Brush textBrush = _currentWidgetBackgroundColor.GetBrightness() > 0.65 ? Brushes.Black : Brushes.White;
+
+                    // Draw Album Art (or placeholder)
+                    if (_currentAlbumArt != null)
                     {
-                        g.FillRectangle(placeholderBrush, layout.AlbumArtRect);
+                        g.DrawImage(_currentAlbumArt, layout.AlbumArtRect);
                     }
-                    using (var sfNoArt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                    else
                     {
-                        g.DrawString("No Art", infoFont, textBrush, layout.AlbumArtRect, sfNoArt);
+                        using (var placeholderBrush = new SolidBrush(Color.FromArgb(100, 128, 128, 128)))
+                        {
+                            g.FillRectangle(placeholderBrush, layout.AlbumArtRect);
+                        }
+                        using (var sfNoArt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                        {
+                            g.DrawString("No Art", infoFont, textBrush, layout.AlbumArtRect, sfNoArt);
+                        }
                     }
+
+                    // Draw Text
+                    if (layout.TitleRect.Width > 0)
+                    {
+                        g.DrawString(_currentTitle ?? "Unknown Title", titleFont, textBrush, layout.TitleRect, textFormat);
+                        g.DrawString(_currentArtist ?? "Unknown Album Artist", infoFont, textBrush, layout.ArtistRect, textFormat);
+                        g.DrawString(_currentAlbum ?? "Unknown Album", infoFont, textBrush, layout.AlbumRect, textFormat);
+                    }
+
+                    // Draw Buttons
+                    if (layout.PrevButtonRect.Width > 0)
+                    {
+                        if (_prevIcon != null) g.DrawImage(_prevIcon, layout.PrevButtonRect);
+
+                        Bitmap currentPlayPauseIcon = (_currentPlayerState?.PlaybackState == PlaybackState.playing ? _pauseIcon : _playIcon);
+                        if (currentPlayPauseIcon != null) g.DrawImage(currentPlayPauseIcon, layout.PlayPauseButtonRect);
+
+                        if (_nextIcon != null) g.DrawImage(_nextIcon, layout.NextButtonRect);
+                    }
+
+                    return bitmap;
                 }
-
-                // Draw Text
-                if (layout.TitleRect.Width > 0)
-                {
-                    g.DrawString(_currentTitle ?? "Unknown Title", titleFont, textBrush, layout.TitleRect, textFormat);
-                    g.DrawString(_currentArtist ?? "Unknown Album Artist", infoFont, textBrush, layout.ArtistRect, textFormat);
-                    g.DrawString(_currentAlbum ?? "Unknown Album", infoFont, textBrush, layout.AlbumRect, textFormat);
-                }
-
-                // Draw Buttons
-                if (layout.PrevButtonRect.Width > 0)
-                {
-                    if (_prevIcon != null) g.DrawImage(_prevIcon, layout.PrevButtonRect);
-
-                    Bitmap currentPlayPauseIcon = (_currentPlayerState?.PlaybackState == PlaybackState.playing ? _pauseIcon : _playIcon);
-                    if (currentPlayPauseIcon != null) g.DrawImage(currentPlayPauseIcon, layout.PlayPauseButtonRect);
-
-                    if (_nextIcon != null) g.DrawImage(_nextIcon, layout.NextButtonRect);
-                }
-
-                return bitmap;
             }
             catch (Exception ex)
             {
