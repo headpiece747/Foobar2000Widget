@@ -41,6 +41,7 @@ namespace Foobar2000Widget
         private string _currentAlbum = "Unknown Album";
         private bool _albumArtLoadAttempted;
         private Color _currentWidgetBackgroundColor = Color.Black;
+        private bool _hasConnectedSuccessfully;
 
         public Foobar2000WidgetInstance(IWidgetObject widgetObject, WidgetSize widgetSize, Guid instanceGuid)
         {
@@ -264,36 +265,59 @@ namespace Foobar2000Widget
                     return;
                 }
 
-                await GetPlayerStateAsync(cancellationToken);
+                try
+                {
+                    await GetPlayerStateAsync(cancellationToken);
+                    _hasConnectedSuccessfully = true;
+
+                    if (cancellationToken.IsCancellationRequested) return;
+
+                    string newTrackId = GenerateTrackIdentifier();
+                    bool trackChanged = (_currentTrackId != newTrackId);
+                    _currentTrackId = newTrackId;
+
+                    if (trackChanged && _currentPlayerState?.ActiveItem != null)
+                    {
+                        _albumArtLoadAttempted = false;
+                        _currentAlbumArt?.Dispose();
+                        _currentAlbumArt = null;
+                        await GetAlbumArtAsync(_currentPlayerState.ActiveItem.PlaylistId, _currentPlayerState.ActiveItem.Index, cancellationToken);
+                    }
+                    else if (_currentAlbumArt == null && !_albumArtLoadAttempted && _currentPlayerState?.ActiveItem != null)
+                    {
+                        await GetAlbumArtAsync(_currentPlayerState.ActiveItem.PlaylistId, _currentPlayerState.ActiveItem.Index, cancellationToken);
+                    }
+                    else if (_currentPlayerState?.ActiveItem == null && _currentAlbumArt != null)
+                    {
+                        _currentAlbumArt?.Dispose();
+                        _currentAlbumArt = null;
+                        _albumArtLoadAttempted = false;
+                        UpdateBackgroundColorFromAlbumArt();
+                    }
+                }
+                catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException)
+                {
+                    WidgetManager?.WriteLogMessage(this, LogLevel.WARN, $"Connection error updating widget: {ex.Message}.");
+                    _currentTitle = _hasConnectedSuccessfully ? "Foobar was closed" : "Foobar is not running";
+                    _currentArtist = string.Empty;
+                    _currentAlbum = string.Empty;
+                    _currentAlbumArt?.Dispose();
+                    _currentAlbumArt = null;
+                    _currentWidgetBackgroundColor = Color.Black;
+                    _currentPlayerState = null;
+                }
+                catch (Exception ex)
+                {
+                    WidgetManager?.WriteLogMessage(this, LogLevel.ERROR, $"Unexpected error updating widget: {ex.ToString()}");
+                    _currentWidgetBackgroundColor = Color.Black;
+                    _currentTitle = "Widget Error";
+                    _currentArtist = "Check logs for details";
+                    _currentAlbum = "";
+                }
 
                 if (cancellationToken.IsCancellationRequested) return;
 
-                string newTrackId = GenerateTrackIdentifier();
-                bool trackChanged = (_currentTrackId != newTrackId);
-                _currentTrackId = newTrackId;
-
-                if (trackChanged && _currentPlayerState?.ActiveItem != null)
-                {
-                    _albumArtLoadAttempted = false;
-                    _currentAlbumArt?.Dispose();
-                    _currentAlbumArt = null;
-                    await GetAlbumArtAsync(_currentPlayerState.ActiveItem.PlaylistId, _currentPlayerState.ActiveItem.Index, cancellationToken);
-                }
-                else if (_currentAlbumArt == null && !_albumArtLoadAttempted && _currentPlayerState?.ActiveItem != null)
-                {
-                    await GetAlbumArtAsync(_currentPlayerState.ActiveItem.PlaylistId, _currentPlayerState.ActiveItem.Index, cancellationToken);
-                }
-                else if (_currentPlayerState?.ActiveItem == null && _currentAlbumArt != null)
-                {
-                    _currentAlbumArt?.Dispose();
-                    _currentAlbumArt = null;
-                    _albumArtLoadAttempted = false;
-                    UpdateBackgroundColorFromAlbumArt();
-                }
-
-
-                if (cancellationToken.IsCancellationRequested) return;
-
+                // Always draw the widget with the current state, whether it's from a successful update or an error state
                 using (Bitmap widgetBitmap = DrawWidget())
                 {
                     if (widgetBitmap != null)
@@ -311,16 +335,6 @@ namespace Foobar2000Widget
             catch (OperationCanceledException)
             {
                 WidgetManager?.WriteLogMessage(this, LogLevel.DEBUG, "UpdateWidgetAsync was cancelled.");
-            }
-            catch (HttpRequestException httpEx)
-            {
-                WidgetManager?.WriteLogMessage(this, LogLevel.WARN, $"HTTP request error updating widget: {httpEx.Message}. Check Foobar2000/Beefweb connection to '{_beefwebApiUrl}'.");
-                _currentWidgetBackgroundColor = Color.Black;
-            }
-            catch (Exception ex)
-            {
-                WidgetManager?.WriteLogMessage(this, LogLevel.ERROR, $"Unexpected error updating widget: {ex.ToString()}");
-                _currentWidgetBackgroundColor = Color.Black;
             }
             finally
             {
