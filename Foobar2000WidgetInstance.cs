@@ -451,7 +451,12 @@ namespace Foobar2000Widget
                 if (ms.Length > 0)
                 {
                     ms.Position = 0;
-                    _currentAlbumArt = new Bitmap(ms);
+                    // By creating a temporary bitmap and then a new bitmap from the temporary one,
+                    // we decouple the final bitmap from the memory stream, allowing it to be disposed safely.
+                    using (var tempBitmap = new Bitmap(ms))
+                    {
+                        _currentAlbumArt = new Bitmap(tempBitmap);
+                    }
                 }
                 else { _currentAlbumArt = null; }
 
