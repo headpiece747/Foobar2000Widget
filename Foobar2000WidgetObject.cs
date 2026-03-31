@@ -17,7 +17,26 @@ namespace Foobar2000Widget
         public string     Author      => "headpiece747";
         public string     Website     => "https://eclipticsight.com";
         public string     Description => "Control foobar2000";
-        public Version    Version     => Assembly.GetExecutingAssembly().GetName().Version;
+
+        // Assembly.GetName().Version is always 4-part (e.g. 1.0.1.0).
+        // We trim trailing ".0" segments so the display matches the 3-part
+        // version set in AssemblyInfo.cs (e.g. 1.0.1).
+        public Version Version
+        {
+            get
+            {
+                var v = Assembly.GetExecutingAssembly().GetName().Version;
+                if (v == null) return new Version(1, 0, 0);
+
+                // Build trimmed string: drop revision if 0, then drop build if also 0
+                if (v.Revision != 0)
+                    return new Version(v.Major, v.Minor, v.Build, v.Revision);
+                if (v.Build != 0)
+                    return new Version(v.Major, v.Minor, v.Build);
+                return new Version(v.Major, v.Minor);
+            }
+        }
+
         public SdkVersion TargetSdk   => WidgetUtility.CurrentSdkVersion;
 
         public List<WidgetSize> SupportedSizes => new List<WidgetSize> { new WidgetSize(5, 4) };
@@ -27,8 +46,8 @@ namespace Foobar2000Widget
         private Bitmap _previewImage;
 
         // All three properties share the same cached instance
-        public Bitmap PreviewImage              => EnsurePreview();
-        public Bitmap WidgetThumbnail           => EnsurePreview();
+        public Bitmap PreviewImage                   => EnsurePreview();
+        public Bitmap WidgetThumbnail                => EnsurePreview();
         public Bitmap GetWidgetPreview(WidgetSize _) => EnsurePreview();
 
         private Bitmap EnsurePreview()
@@ -42,7 +61,6 @@ namespace Foobar2000Widget
                 {
                     if (stream != null)
                     {
-                        // Copy to MemoryStream so bitmap is not tied to the manifest stream
                         using (var ms = new MemoryStream())
                         {
                             stream.CopyTo(ms);
@@ -58,7 +76,6 @@ namespace Foobar2000Widget
                 LastErrorMessage = $"Error loading preview: {ex.Message}";
             }
 
-            // Fallback placeholder
             _previewImage = CreatePlaceholderBitmap();
             return _previewImage;
         }
@@ -70,7 +87,6 @@ namespace Foobar2000Widget
 
         public WidgetError Load(string resourcePath)
         {
-            // Reset so EnsurePreview re-loads if called after Unload
             _previewImage?.Dispose();
             _previewImage = null;
             EnsurePreview();
@@ -87,8 +103,8 @@ namespace Foobar2000Widget
         private Bitmap CreatePlaceholderBitmap()
         {
             var bmp = new Bitmap(64, 64);
-            using (var g  = Graphics.FromImage(bmp))
-            using (var f  = new Font("Arial", 12, System.Drawing.FontStyle.Bold))
+            using (var g = Graphics.FromImage(bmp))
+            using (var f = new Font("Arial", 12, System.Drawing.FontStyle.Bold))
             {
                 g.Clear(Color.DarkGray);
                 g.DrawString("?", f, Brushes.White, 5, 5);
