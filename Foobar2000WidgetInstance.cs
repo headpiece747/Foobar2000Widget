@@ -578,29 +578,46 @@ namespace Foobar2000Widget
 
                     if (colorBuckets.Count > 0)
                     {
-                        // Pick the brightest color on the album artwork
-                        var bestBucket = colorBuckets.Values
-                            .OrderByDescending(b => b.color.GetBrightness())
-                            .ThenByDescending(b => b.color.GetSaturation())
-                            .First();
+                        // 1. First, check for vibrant/colorful shades (saturation >= 0.22 and brightness in readable range)
+                        // This prevents desaturated skin tones, white microphones, or muddy grey highlights from beating true artwork colors
+                        var colorfulBuckets = colorBuckets.Values
+                            .Where(b => b.color.GetSaturation() >= 0.22f && b.color.GetBrightness() >= 0.18f && b.color.GetBrightness() <= 0.85f)
+                            .ToList();
 
-                        Color brightest = bestBucket.color;
-
-                        // Because text is fixed to crisp white (Brushes.White), if the brightest color is
-                        // extremely light (> 0.65 brightness), gently cap at 0.65 to guarantee sharp text contrast
-                        float currentBrightness = brightest.GetBrightness();
-                        if (currentBrightness > 0.65f)
+                        Color selectedColor;
+                        if (colorfulBuckets.Count > 0)
                         {
-                            _currentWidgetBackgroundColor = AdjustBrightness(brightest, 0.65f);
+                            // Score vibrant colors by combining brightness, saturation, and presence frequency
+                            var bestBucket = colorfulBuckets
+                                .OrderByDescending(b => b.color.GetBrightness() * (0.5f + 0.5f * b.color.GetSaturation()) * (1.0f + Math.Min(0.5f, b.count / 50.0f)))
+                                .First();
+                            selectedColor = bestBucket.color;
                         }
                         else
                         {
-                            _currentWidgetBackgroundColor = brightest;
+                            // Fallback if artwork is truly monochrome or desaturated: pick cleanest brightest neutral
+                            var bestBucket = colorBuckets.Values
+                                .OrderByDescending(b => b.color.GetBrightness())
+                                .ThenByDescending(b => b.count)
+                                .First();
+                            selectedColor = bestBucket.color;
+                        }
+
+                        // Because text is fixed to crisp white (Brushes.White), if the selected color is
+                        // extremely light (> 0.65 brightness), gently cap at 0.65 to guarantee sharp text contrast
+                        float currentBrightness = selectedColor.GetBrightness();
+                        if (currentBrightness > 0.65f)
+                        {
+                            _currentWidgetBackgroundColor = AdjustBrightness(selectedColor, 0.65f);
+                        }
+                        else
+                        {
+                            _currentWidgetBackgroundColor = selectedColor;
                         }
                     }
                     else
                     {
-                        // Fallback if artwork is monochrome or dark
+                        // Fallback if artwork is dark or unreadable
                         Color px = sample.GetPixel(16, 16);
                         _currentWidgetBackgroundColor = px;
                     }

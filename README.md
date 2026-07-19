@@ -8,8 +8,8 @@ Foobar2000Widget is a rich, dynamic media control and tracking widget built for 
 
 * **👆 Touch-Screen Progress Bar Seeking:**
   Tap or drag anywhere along the progress bar (`+/- 16px` vertical touch zone) to instantly scrub forward or backward through your track with zero latency (`SetPlayerPositionAsync`). The scrubber dot jumps immediately under your finger upon contact.
-* **🎨 Dynamic Brightest-Color Artwork Backgrounds:**
-  Automatically scans the currently playing album art (`32x32` thumbnail sample) and sets the widget's background to the **brightest color on the artwork** (`OrderByDescending(GetBrightness())`). Includes an automatic contrast safety guard (`0.65` brightness cap) so crisp white text and buttons remain sharp and legible even on pale/near-white covers.
+* **🎨 Vibrancy-Aware Brightest-Color Artwork Backgrounds:**
+  Automatically scans the currently playing album art (`32x32` thumbnail sample) and extracts the **brightest and most vibrant color** on the artwork. Uses a two-pass vibrancy filter (`GetSaturation() >= 0.22`) so that rich artwork colors (like vivid red or royal blue) always take priority over pale skin tones, white microphones, or muddy grey highlights. Includes an automatic contrast safety guard (`0.65` brightness cap) so crisp white text and buttons remain sharp and legible even on pale covers.
 * **⏱️ Real-Time Playback Timestamps (`M:SS`):**
   Displays real-time current track position (e.g., `1:24`) below the left edge and total duration (e.g., `3:07`) below the right edge of the progress bar using zero-overhead time formatting (`~0.001 ms`).
 * **📐 Ergonomic Media Control Deck:**
@@ -40,7 +40,7 @@ You can install the widget quickly from a pre-built **Release Zip**, or build it
 
 If you simply want to use the widget right away without compiling code:
 
-1. Go to the **[Releases](https://github.com/headpiece747/Foobar2000Widget/releases)** page and download the latest release zip (e.g., `Foobar2000Widget-v1.0.4.zip`).
+1. Go to the **[Releases](https://github.com/headpiece747/Foobar2000Widget/releases)** page and download the latest release zip (e.g., `Foobar2000Widget-v1.0.5.zip`).
 2. Open your Windows File Explorer and navigate to your WigiDash Manager widgets directory:
    ```text
    %AppData%\G.SKILL\WigiDashManager\Widgets\Foobar2000Widget\
@@ -94,7 +94,7 @@ If you want to modify code, customize colors, or step through with the debugger:
 * `Foobar2000WidgetInstance.cs` — Core widget lifecycle: handles `500 ms` polling, Beefweb REST API requests, dynamic brightest-color extraction (`UpdateBackgroundColorFromAlbumArt`), GDI+ rendering (`DrawWidget`), touch progress bar seeking (`ClickEvent`), and command execution (`SendPlayerCommandAsync`).
 * `BeefwebApiModels.cs` — Strongly-typed C# JSON deserialization models for Beefweb player state, active item metadata, and playback status (`System.Text.Json`).
 * `Foobar2000WidgetSettings.xaml` / `.xaml.cs` — WPF Settings dialog interface for configuring the Beefweb endpoint URL.
-* `Properties/AssemblyInfo.cs` — Assembly metadata and 3-part version numbering (`1.0.4`).
+* `Properties/AssemblyInfo.cs` — Assembly metadata and 3-part version numbering (`1.0.5`).
 
 ---
 
