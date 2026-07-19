@@ -1,5 +1,7 @@
 # Foobar2000 Player Control & Media Deck Widget for WigiDash
 
+![Foobar2000 Widget Preview](preview.png)
+
 Foobar2000Widget is a rich, dynamic media control and tracking widget built for the **WigiDash Widget Framework**. It connects to your [Foobar2000](https://www.foobar2000.org/) media player via the [Beefweb API plugin (`foo_beefweb`)](https://github.com/hyperblast/beefweb) to display real-time track info, interactive touch controls, and stunning dynamic artwork backgrounds on your WigiDash touch screen.
 
 ---
