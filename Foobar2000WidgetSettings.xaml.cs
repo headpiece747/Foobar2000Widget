@@ -26,8 +26,8 @@ namespace Foobar2000Widget
         // Loads settings from the widget instance
         private void LoadSettings()
         {
-            // Access WidgetManager through the WidgetObject property of the instance
-            if (_widgetInstance.WidgetObject.WidgetManager.LoadSetting(_widgetInstance, "BeefwebApiUrl", out string apiUrl))
+            var manager = _widgetInstance?.WidgetObject?.WidgetManager;
+            if (manager != null && manager.LoadSetting(_widgetInstance, "BeefwebApiUrl", out string apiUrl) && !string.IsNullOrWhiteSpace(apiUrl))
             {
                 BeefwebApiUrlTextBox.Text = apiUrl;
             }
@@ -39,18 +39,30 @@ namespace Foobar2000Widget
         }
 
         // Saves settings to the widget instance
-        private void SaveSettings()
+        private bool SaveSettings()
         {
-            // Access WidgetManager through the WidgetObject property of the instance
-            _widgetInstance.WidgetObject.WidgetManager.StoreSetting(_widgetInstance, "BeefwebApiUrl", BeefwebApiUrlTextBox.Text);
+            var manager = _widgetInstance?.WidgetObject?.WidgetManager;
+            if (manager == null) return false;
+
+            string inputUrl = BeefwebApiUrlTextBox.Text?.Trim()?.TrimEnd('/') ?? "";
+            if (!System.Uri.TryCreate(inputUrl, System.UriKind.Absolute, out System.Uri uriResult) ||
+                (uriResult.Scheme != System.Uri.UriSchemeHttp && uriResult.Scheme != System.Uri.UriSchemeHttps))
+            {
+                MessageBox.Show("Please enter a valid HTTP or HTTPS API URL (e.g., http://localhost:8880/api).", "Invalid API URL", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            manager.StoreSetting(_widgetInstance, "BeefwebApiUrl", inputUrl);
+            return true;
         }
 
         // Event handler for the Save button click
         private void SaveButton_Click(object sender, RoutedEventArgs e)
         {
-            SaveSettings();
-            // Optionally, provide feedback to the user that settings have been saved
-            MessageBox.Show("Settings saved!", "Foobar2000 Widget", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (SaveSettings())
+            {
+                MessageBox.Show("Settings saved!", "Foobar2000 Widget", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
         }
     }
 }

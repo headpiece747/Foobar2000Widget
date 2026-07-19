@@ -18,6 +18,9 @@ namespace Foobar2000Widget
         public string     Website     => "https://eclipticsight.com";
         public string     Description => "Control foobar2000";
 
+        private Version _cachedVersion;
+        private readonly object _previewLock = new object();
+
         // Assembly.GetName().Version is always 4-part (e.g. 1.0.1.0).
         // We trim trailing ".0" segments so the display matches the 3-part
         // version set in AssemblyInfo.cs (e.g. 1.0.1).
@@ -25,15 +28,16 @@ namespace Foobar2000Widget
         {
             get
             {
+                if (_cachedVersion != null) return _cachedVersion;
                 var v = Assembly.GetExecutingAssembly().GetName().Version;
-                if (v == null) return new Version(1, 0, 0);
+                if (v == null) return _cachedVersion = new Version(1, 0, 0);
 
                 // Build trimmed string: drop revision if 0, then drop build if also 0
                 if (v.Revision != 0)
-                    return new Version(v.Major, v.Minor, v.Build, v.Revision);
+                    return _cachedVersion = new Version(v.Major, v.Minor, v.Build, v.Revision);
                 if (v.Build != 0)
-                    return new Version(v.Major, v.Minor, v.Build);
-                return new Version(v.Major, v.Minor);
+                    return _cachedVersion = new Version(v.Major, v.Minor, v.Build);
+                return _cachedVersion = new Version(v.Major, v.Minor);
             }
         }
 
@@ -54,30 +58,38 @@ namespace Foobar2000Widget
         {
             if (_previewImage != null) return _previewImage;
 
-            try
+            lock (_previewLock)
             {
-                var assembly = Assembly.GetExecutingAssembly();
-                using (var stream = assembly.GetManifestResourceStream(PREVIEW_RESOURCE))
+                if (_previewImage != null) return _previewImage;
+
+                try
                 {
-                    if (stream != null)
+                    var assembly = Assembly.GetExecutingAssembly();
+                    using (var stream = assembly.GetManifestResourceStream(PREVIEW_RESOURCE))
                     {
-                        using (var ms = new MemoryStream())
+                        if (stream != null)
                         {
-                            stream.CopyTo(ms);
-                            ms.Position  = 0;
-                            _previewImage = new Bitmap(ms);
-                            return _previewImage;
+                            using (var ms = new MemoryStream())
+                            {
+                                stream.CopyTo(ms);
+                                ms.Position  = 0;
+                                using (var temp = new Bitmap(ms))
+                                {
+                                    _previewImage = new Bitmap(temp);
+                                }
+                                return _previewImage;
+                            }
                         }
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                LastErrorMessage = $"Error loading preview: {ex.Message}";
-            }
+                catch (Exception ex)
+                {
+                    LastErrorMessage = $"Error loading preview: {ex.Message}";
+                }
 
-            _previewImage = CreatePlaceholderBitmap();
-            return _previewImage;
+                _previewImage = CreatePlaceholderBitmap();
+                return _previewImage;
+            }
         }
 
         public IWidgetInstance CreateWidgetInstance(WidgetSize widgetSize, Guid instanceGuid)
@@ -87,16 +99,22 @@ namespace Foobar2000Widget
 
         public WidgetError Load(string resourcePath)
         {
-            _previewImage?.Dispose();
-            _previewImage = null;
+            lock (_previewLock)
+            {
+                _previewImage?.Dispose();
+                _previewImage = null;
+            }
             EnsurePreview();
             return WidgetError.NO_ERROR;
         }
 
         public WidgetError Unload()
         {
-            _previewImage?.Dispose();
-            _previewImage = null;
+            lock (_previewLock)
+            {
+                _previewImage?.Dispose();
+                _previewImage = null;
+            }
             return WidgetError.NO_ERROR;
         }
 

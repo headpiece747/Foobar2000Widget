@@ -41,6 +41,10 @@ namespace Foobar2000Widget
         private Color _currentWidgetBackgroundColor = Color.Black;
         private bool _hasConnectedSuccessfully;
 
+        private readonly Font _titleFont = new Font("Arial", 24, FontStyle.Bold);
+        private readonly Font _infoFont  = new Font("Arial", 20);
+        private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
         public Foobar2000WidgetInstance(IWidgetObject widgetObject, WidgetSize widgetSize, Guid instanceGuid)
         {
             WidgetObject = widgetObject;
@@ -144,22 +148,37 @@ namespace Foobar2000Widget
         protected virtual void Dispose(bool disposing)
         {
             if (_disposed) return;
+            _disposed = true;
+
             if (disposing)
             {
                 _updateCts?.Cancel();
-                _updateCts?.Dispose();
-                _updateSemaphore?.Dispose();
-                _httpClient?.Dispose();
-                _currentAlbumArt?.Dispose();
-                _prevIcon?.Dispose();
-                _playIcon?.Dispose();
-                _pauseIcon?.Dispose();
-                _nextIcon?.Dispose();
+                try
+                {
+                    _updateSemaphore?.Wait(TimeSpan.FromSeconds(2));
+                }
+                catch { /* ignore if semaphore already disposed or timed out */ }
+
+                try
+                {
+                    _updateCts?.Dispose();
+                    _httpClient?.Dispose();
+                    _currentAlbumArt?.Dispose();
+                    _prevIcon?.Dispose();
+                    _playIcon?.Dispose();
+                    _pauseIcon?.Dispose();
+                    _nextIcon?.Dispose();
+                    _titleFont?.Dispose();
+                    _infoFont?.Dispose();
+                }
+                finally
+                {
+                    _updateSemaphore?.Dispose();
+                }
             }
             _prevIcon = _playIcon = _pauseIcon = _nextIcon = null;
             _currentAlbumArt   = null;
             _currentPlayerState = null;
-            _disposed = true;
         }
 
         public UserControl GetSettingsControl()
@@ -213,7 +232,10 @@ namespace Foobar2000Widget
                     {
                         stream.CopyTo(ms);
                         ms.Position = 0;
-                        return new Bitmap(ms);
+                        using (var temp = new Bitmap(ms))
+                        {
+                            return new Bitmap(temp);
+                        }
                     }
                 }
             }
@@ -235,11 +257,11 @@ namespace Foobar2000Widget
             try
             {
                 using (var response = await _httpClient.PostAsync(
-                    $"{_beefwebApiUrl}/player/{command}", null, cts.Token))
+                    $"{_beefwebApiUrl}/player/{command}", null, cts.Token).ConfigureAwait(false))
                 {
                     response.EnsureSuccessStatusCode();
-                    await Task.Delay(300, cts.Token);
-                    await UpdateWidgetAsync(cts.Token);
+                    await Task.Delay(300, cts.Token).ConfigureAwait(false);
+                    await UpdateWidgetAsync(cts.Token).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) { }
@@ -320,13 +342,9 @@ namespace Foobar2000Widget
                 Bitmap widgetBitmap = DrawWidget();
                 if (widgetBitmap == null) return;
 
-                Bitmap clone;
-                try   { clone = (Bitmap)widgetBitmap.Clone(); }
-                finally { widgetBitmap.Dispose(); }
-
                 WidgetUpdated?.Invoke(this, new WidgetUpdatedEventArgs
                 {
-                    WidgetBitmap = clone,
+                    WidgetBitmap = widgetBitmap,
                     Offset       = Point.Empty,
                     WaitMax      = 1000
                 });
@@ -338,6 +356,13 @@ namespace Foobar2000Widget
             }
         }
 
+        private string SanitizeMetadata(string input, string fallback)
+        {
+            if (string.IsNullOrEmpty(input)) return fallback;
+            string clean = new string(input.Where(c => !char.IsControl(c) || c == ' ').Take(256).ToArray());
+            return string.IsNullOrWhiteSpace(clean) ? fallback : clean;
+        }
+
         private async Task GetPlayerStateAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -345,21 +370,21 @@ namespace Foobar2000Widget
             string columnsParam = "%25title%25,%25album artist%25,%25album%25";
             string requestUrl   = $"{_beefwebApiUrl}/player?columns={columnsParam}&_={DateTime.Now.Ticks}";
 
-            using (var response = await _httpClient.GetAsync(requestUrl, cancellationToken))
+            using (var response = await _httpClient.GetAsync(requestUrl, cancellationToken).ConfigureAwait(false))
             {
                 response.EnsureSuccessStatusCode();
-                string json = await response.Content.ReadAsStringAsync();
+                string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 if (cancellationToken.IsCancellationRequested) return;
 
-                var playerResponse  = JsonSerializer.Deserialize<GetPlayerStateResponse>(json);
+                var playerResponse  = JsonSerializer.Deserialize<GetPlayerStateResponse>(json, _jsonOptions);
                 _currentPlayerState = playerResponse?.Player;
 
                 if (_currentPlayerState?.ActiveItem?.Columns != null)
                 {
                     var cols       = _currentPlayerState.ActiveItem.Columns;
-                    _currentTitle  = cols.Count > 0 ? (cols[0] ?? "Unknown Title")        : "Unknown Title";
-                    _currentArtist = cols.Count > 1 ? (cols[1] ?? "Unknown Album Artist") : "Unknown Album Artist";
-                    _currentAlbum  = cols.Count > 2 ? (cols[2] ?? "Unknown Album")        : "Unknown Album";
+                    _currentTitle  = cols.Count > 0 ? SanitizeMetadata(cols[0], "Unknown Title")        : "Unknown Title";
+                    _currentArtist = cols.Count > 1 ? SanitizeMetadata(cols[1], "Unknown Album Artist") : "Unknown Album Artist";
+                    _currentAlbum  = cols.Count > 2 ? SanitizeMetadata(cols[2], "Unknown Album")        : "Unknown Album";
                 }
                 else if (_currentPlayerState?.ActiveItem == null)
                 {
@@ -399,7 +424,7 @@ namespace Foobar2000Widget
                     request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue
                         { NoCache = true, NoStore = true };
 
-                    using (var response = await _httpClient.SendAsync(request, cancellationToken))
+                    using (var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false))
                     {
                         if (!response.IsSuccessStatusCode)
                         {
@@ -407,22 +432,29 @@ namespace Foobar2000Widget
                                 WidgetManager?.WriteLogMessage(this, LogLevel.WARN,
                                     $"Album art request failed ({playlistId}/{index}): {response.StatusCode}");
 
+                            _albumArtLoadAttempted = false;
                             _currentAlbumArt?.Dispose();
                             _currentAlbumArt = null;
                             UpdateBackgroundColorFromAlbumArt();
                             return;
                         }
 
+                        if (response.Content.Headers.ContentLength > 10 * 1024 * 1024)
+                        {
+                            WidgetManager?.WriteLogMessage(this, LogLevel.WARN, "Album art exceeds 10MB limit.");
+                            _albumArtLoadAttempted = false;
+                            return;
+                        }
+
                         using (var ms = new MemoryStream())
                         {
-                            await response.Content.CopyToAsync(ms);
+                            await response.Content.CopyToAsync(ms).ConfigureAwait(false);
                             if (cancellationToken.IsCancellationRequested) return;
 
                             _currentAlbumArt?.Dispose();
                             if (ms.Length > 0)
                             {
                                 ms.Position = 0;
-                                // Decode into a temp bitmap then copy — decouples final bitmap from the stream
                                 using (var temp = new Bitmap(ms))
                                     _currentAlbumArt = new Bitmap(temp);
                             }
@@ -440,6 +472,7 @@ namespace Foobar2000Widget
             {
                 WidgetManager?.WriteLogMessage(this, LogLevel.WARN,
                     $"Error fetching album art ({playlistId}/{index}): {ex.Message}");
+                _albumArtLoadAttempted = false;
                 _currentAlbumArt?.Dispose();
                 _currentAlbumArt = null;
                 UpdateBackgroundColorFromAlbumArt();
@@ -513,22 +546,18 @@ namespace Foobar2000Widget
             int textWidth = Math.Max(0, size.Width - textX - padding);
             if (textWidth <= 0) return layout;
 
-            using (var titleFont = new Font("Arial", 24, FontStyle.Bold))
-            using (var infoFont  = new Font("Arial", 20))
-            {
-                int titleH      = titleFont.Height;
-                int infoH       = infoFont.Height;
-                int blockH      = titleH + infoH * 2 + 10;
-                int albumCenterY = layout.AlbumArtRect.Top + layout.AlbumArtRect.Height / 2;
-                int textTopY    = Math.Max(padding,
-                    Math.Min(albumCenterY - blockH / 2,
-                             Math.Max(padding, size.Height - padding - blockH - 60)));
+            int titleH      = _titleFont.Height;
+            int infoH       = _infoFont.Height;
+            int blockH      = titleH + infoH * 2 + 10;
+            int albumCenterY = layout.AlbumArtRect.Top + layout.AlbumArtRect.Height / 2;
+            int textTopY    = Math.Max(padding,
+                Math.Min(albumCenterY - blockH / 2,
+                         Math.Max(padding, size.Height - padding - blockH - 60)));
 
-                int y = textTopY;
-                layout.TitleRect  = new RectangleF(textX, y, textWidth, titleH); y += titleH + 5;
-                layout.ArtistRect = new RectangleF(textX, y, textWidth, infoH);  y += infoH  + 5;
-                layout.AlbumRect  = new RectangleF(textX, y, textWidth, infoH);
-            }
+            int y = textTopY;
+            layout.TitleRect  = new RectangleF(textX, y, textWidth, titleH); y += titleH + 5;
+            layout.ArtistRect = new RectangleF(textX, y, textWidth, infoH);  y += infoH  + 5;
+            layout.AlbumRect  = new RectangleF(textX, y, textWidth, infoH);
 
             int btnSize    = 48;
             int btnSpacing = 10;
@@ -571,8 +600,6 @@ namespace Foobar2000Widget
             try
             {
                 using (var g          = Graphics.FromImage(bitmap))
-                using (var titleFont  = new Font("Arial", 24, FontStyle.Bold))
-                using (var infoFont   = new Font("Arial", 20))
                 using (var textFormat = new StringFormat    // created & disposed here, not in struct
                 {
                     Trimming    = StringTrimming.EllipsisCharacter,
@@ -599,15 +626,15 @@ namespace Foobar2000Widget
 
                         using (var sf = new StringFormat
                             { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                            g.DrawString("No Art", infoFont, textBrush, layout.AlbumArtRect, sf);
+                            g.DrawString("No Art", _infoFont, textBrush, layout.AlbumArtRect, sf);
                     }
 
                     // Text
                     if (layout.TitleRect.Width > 0)
                     {
-                        g.DrawString(_currentTitle  ?? "Unknown Title",        titleFont, textBrush, layout.TitleRect,  textFormat);
-                        g.DrawString(_currentArtist ?? "Unknown Album Artist",  infoFont,  textBrush, layout.ArtistRect, textFormat);
-                        g.DrawString(_currentAlbum  ?? "Unknown Album",         infoFont,  textBrush, layout.AlbumRect,  textFormat);
+                        g.DrawString(_currentTitle  ?? "Unknown Title",        _titleFont, textBrush, layout.TitleRect,  textFormat);
+                        g.DrawString(_currentArtist ?? "Unknown Album Artist",  _infoFont,  textBrush, layout.ArtistRect, textFormat);
+                        g.DrawString(_currentAlbum  ?? "Unknown Album",         _infoFont,  textBrush, layout.AlbumRect,  textFormat);
                     }
 
                     // Buttons
