@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -39,6 +40,7 @@ namespace Foobar2000Widget
         private string _currentAlbum  = "Unknown Album";
         private bool _albumArtLoadAttempted;
         private Color _currentWidgetBackgroundColor = Color.Black;
+        private Color _currentAccentColor = Color.Black;
         private bool _hasConnectedSuccessfully;
 
         private readonly Font _titleFont = new Font("Arial", 24, FontStyle.Bold);
@@ -484,24 +486,89 @@ namespace Foobar2000Widget
             if (_currentAlbumArt == null)
             {
                 _currentWidgetBackgroundColor = Color.Black;
+                _currentAccentColor           = Color.Black;
                 return;
             }
+
             try
             {
-                using (var tinyArt = new Bitmap(1, 1))
-                using (var g = Graphics.FromImage(tinyArt))
+                using (var sample = new Bitmap(32, 32))
+                using (var g = Graphics.FromImage(sample))
                 {
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(_currentAlbumArt, new Rectangle(0, 0, 1, 1));
-                    var px = tinyArt.GetPixel(0, 0);
-                    _currentWidgetBackgroundColor = Color.FromArgb(255, px.R, px.G, px.B);
+                    g.DrawImage(_currentAlbumArt, new Rectangle(0, 0, 32, 32));
+
+                    var colorBuckets = new Dictionary<int, (Color color, int count, float score)>();
+
+                    for (int y = 0; y < sample.Height; y++)
+                    {
+                        for (int x = 0; x < sample.Width; x++)
+                        {
+                            Color px = sample.GetPixel(x, y);
+                            float saturation = px.GetSaturation();
+                            float brightness = px.GetBrightness();
+
+                            // Filter out extreme blacks, whites, and dull grays
+                            if (brightness < 0.15f || brightness > 0.85f || saturation < 0.20f)
+                                continue;
+
+                            // Quantize color by rounding R, G, B to nearest 16 to bucket similar colors
+                            int quantR = (px.R / 16) * 16;
+                            int quantG = (px.G / 16) * 16;
+                            int quantB = (px.B / 16) * 16;
+                            int key = (quantR << 16) | (quantG << 8) | quantB;
+
+                            if (colorBuckets.TryGetValue(key, out var bucket))
+                            {
+                                colorBuckets[key] = (px, bucket.count + 1, bucket.score + saturation);
+                            }
+                            else
+                            {
+                                colorBuckets[key] = (px, 1, saturation);
+                            }
+                        }
+                    }
+
+                    if (colorBuckets.Count > 0)
+                    {
+                        // Pick best vibrant/dominant color (weighted by count * saturation)
+                        var bestBucket = colorBuckets.Values
+                            .OrderByDescending(b => b.count * (1.0f + b.color.GetSaturation() * 2.0f))
+                            .First();
+
+                        Color vibrant = bestBucket.color;
+
+                        // Adjust luminance so it creates a rich, dark-themed background where text pops
+                        _currentWidgetBackgroundColor = AdjustBrightness(vibrant, 0.35f);
+                        _currentAccentColor           = AdjustBrightness(vibrant, 0.18f);
+                    }
+                    else
+                    {
+                        // Fallback if artwork is black/white/monochrome: pick the clearest dark average
+                        Color px = sample.GetPixel(16, 16);
+                        _currentWidgetBackgroundColor = AdjustBrightness(px, 0.25f);
+                        _currentAccentColor           = Color.Black;
+                    }
                 }
             }
             catch (Exception ex)
             {
                 WidgetManager?.WriteLogMessage(this, LogLevel.WARN, $"Color extraction error: {ex.Message}");
                 _currentWidgetBackgroundColor = Color.Black;
+                _currentAccentColor           = Color.Black;
             }
+        }
+
+        private Color AdjustBrightness(Color color, float targetBrightness)
+        {
+            float currentBrightness = color.GetBrightness();
+            if (currentBrightness <= 0.001f) return color;
+
+            float factor = targetBrightness / currentBrightness;
+            int r = Math.Min(255, Math.Max(0, (int)(color.R * factor)));
+            int g = Math.Min(255, Math.Max(0, (int)(color.G * factor)));
+            int b = Math.Min(255, Math.Max(0, (int)(color.B * factor)));
+            return Color.FromArgb(255, r, g, b);
         }
 
         private string GenerateTrackIdentifier()
@@ -609,7 +676,14 @@ namespace Foobar2000Widget
                     g.SmoothingMode     = SmoothingMode.AntiAlias;
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                    g.Clear(_currentWidgetBackgroundColor);
+                    using (var bgBrush = new LinearGradientBrush(
+                        new Rectangle(0, 0, size.Width, size.Height),
+                        _currentWidgetBackgroundColor,
+                        _currentAccentColor,
+                        LinearGradientMode.ForwardDiagonal))
+                    {
+                        g.FillRectangle(bgBrush, new Rectangle(0, 0, size.Width, size.Height));
+                    }
 
                     Brush textBrush = _currentWidgetBackgroundColor.GetBrightness() > 0.65f
                         ? Brushes.Black : Brushes.White;
