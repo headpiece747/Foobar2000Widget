@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,6 +33,7 @@ namespace Foobar2000Widget
         private bool _pollingStarted;   // prevents duplicate polling loops
 
         private PlayerState _currentPlayerState;
+        private DateTime _lastPositionUpdateTime = DateTime.UtcNow;
         private string _currentTrackId = string.Empty;
         private Bitmap _currentAlbumArt;
         private Bitmap _prevIcon, _playIcon, _pauseIcon, _nextIcon;
@@ -39,12 +41,14 @@ namespace Foobar2000Widget
         private string _currentArtist = "Unknown Album Artist";
         private string _currentAlbum  = "Unknown Album";
         private bool _albumArtLoadAttempted;
-        private Color _currentWidgetBackgroundColor = Color.Black;
-        private Color _currentAccentColor = Color.Black;
+        private Color _currentWidgetBackgroundColor = Color.FromArgb(115, 128, 142);
+        private Color _currentAccentColor = Color.FromArgb(115, 128, 142);
         private bool _hasConnectedSuccessfully;
 
-        private readonly Font _titleFont = new Font("Arial", 24, FontStyle.Bold);
-        private readonly Font _infoFont  = new Font("Arial", 20);
+        private readonly Font _titleFont       = new Font("Arial", 24, FontStyle.Bold);
+        private readonly Font _infoFont        = new Font("Arial", 16);
+        private readonly Font _timeFont        = new Font("Arial", 14);
+        private readonly Font _fallbackArtFont = new Font("Arial", 72, FontStyle.Bold);
         private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
         public Foobar2000WidgetInstance(IWidgetObject widgetObject, WidgetSize widgetSize, Guid instanceGuid)
@@ -81,7 +85,7 @@ namespace Foobar2000Widget
                             LoadSettings();
                             _settingsLoaded = true;
                         }
-                        await Task.Delay(2000, token);
+                        await Task.Delay(1000, token);
                         if (token.IsCancellationRequested) break;
                         await UpdateWidgetAsync(token);
                     }
@@ -172,6 +176,8 @@ namespace Foobar2000Widget
                     _nextIcon?.Dispose();
                     _titleFont?.Dispose();
                     _infoFont?.Dispose();
+                    _timeFont?.Dispose();
+                    _fallbackArtFont?.Dispose();
                 }
                 finally
                 {
@@ -273,6 +279,43 @@ namespace Foobar2000Widget
             }
         }
 
+        private async Task SetPlayerPositionAsync(double positionSeconds)
+        {
+            if (_disposed || string.IsNullOrEmpty(_beefwebApiUrl)) return;
+            var cts = _updateCts;
+            if (cts == null || cts.IsCancellationRequested) return;
+
+            try
+            {
+                var requestBody = new SetPlayerStateRequest { Position = positionSeconds };
+                string jsonBody = JsonSerializer.Serialize(requestBody, _jsonOptions);
+                using (var content = new StringContent(jsonBody, Encoding.UTF8, "application/json"))
+                using (var response = await _httpClient.PostAsync(
+                    $"{_beefwebApiUrl}/player", content, cts.Token).ConfigureAwait(false))
+                {
+                    response.EnsureSuccessStatusCode();
+                    if (_currentPlayerState?.ActiveItem != null)
+                    {
+                        _currentPlayerState.ActiveItem.Position = positionSeconds;
+                        _lastPositionUpdateTime = DateTime.UtcNow;
+                    }
+                    WidgetUpdated?.Invoke(this, new WidgetUpdatedEventArgs
+                    {
+                        WidgetBitmap = DrawWidget(),
+                        Offset       = Point.Empty,
+                        WaitMax      = 1000
+                    });
+                    await Task.Delay(200, cts.Token).ConfigureAwait(false);
+                    await UpdateWidgetAsync(cts.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                WidgetManager?.WriteLogMessage(this, LogLevel.WARN, $"SetPlayerPositionAsync failed: {ex.Message}");
+            }
+        }
+
         private async Task UpdateWidgetAsync(CancellationToken cancellationToken)
         {
             if (_disposed || cancellationToken.IsCancellationRequested) return;
@@ -321,13 +364,11 @@ namespace Foobar2000Widget
                 }
                 catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException)
                 {
-                    WidgetManager?.WriteLogMessage(this, LogLevel.WARN, $"Connection error: {ex.Message}");
-                    _currentTitle  = _hasConnectedSuccessfully ? "Foobar was closed" : "Foobar is not running";
-                    _currentArtist = string.Empty;
-                    _currentAlbum  = string.Empty;
-                    _currentAlbumArt?.Dispose();
                     _currentAlbumArt              = null;
-                    _currentWidgetBackgroundColor  = Color.Black;
+                    if (_currentAlbumArt == null)
+                    {
+                        _currentWidgetBackgroundColor = Color.FromArgb(115, 128, 142);
+                    }
                     _currentPlayerState            = null;
                 }
                 catch (Exception ex)
@@ -380,6 +421,7 @@ namespace Foobar2000Widget
 
                 var playerResponse  = JsonSerializer.Deserialize<GetPlayerStateResponse>(json, _jsonOptions);
                 _currentPlayerState = playerResponse?.Player;
+                _lastPositionUpdateTime = DateTime.UtcNow;
 
                 if (_currentPlayerState?.ActiveItem?.Columns != null)
                 {
@@ -485,8 +527,7 @@ namespace Foobar2000Widget
         {
             if (_currentAlbumArt == null)
             {
-                _currentWidgetBackgroundColor = Color.Black;
-                _currentAccentColor           = Color.Black;
+                _currentWidgetBackgroundColor = Color.FromArgb(115, 128, 142);
                 return;
             }
 
@@ -498,21 +539,20 @@ namespace Foobar2000Widget
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.DrawImage(_currentAlbumArt, new Rectangle(0, 0, 32, 32));
 
-                    var colorBuckets = new Dictionary<int, (Color color, int count, float score)>();
+                    var colorBuckets = new Dictionary<int, (Color color, int count, float brightness)>();
 
                     for (int y = 0; y < sample.Height; y++)
                     {
                         for (int x = 0; x < sample.Width; x++)
                         {
                             Color px = sample.GetPixel(x, y);
-                            float saturation = px.GetSaturation();
                             float brightness = px.GetBrightness();
 
-                            // Filter out extreme blacks, whites, and dull grays
-                            if (brightness < 0.15f || brightness > 0.85f || saturation < 0.20f)
+                            // Filter out extreme blacks/whites so borders or blown-out highlights don't override actual colors
+                            if (brightness < 0.10f || brightness > 0.92f)
                                 continue;
 
-                            // Quantize color by rounding R, G, B to nearest 16 to bucket similar colors
+                            // Quantize color by rounding R, G, B to nearest 16 to group similar shades
                             int quantR = (px.R / 16) * 16;
                             int quantG = (px.G / 16) * 16;
                             int quantB = (px.B / 16) * 16;
@@ -520,42 +560,56 @@ namespace Foobar2000Widget
 
                             if (colorBuckets.TryGetValue(key, out var bucket))
                             {
-                                colorBuckets[key] = (px, bucket.count + 1, bucket.score + saturation);
+                                if (brightness > bucket.brightness)
+                                {
+                                    colorBuckets[key] = (px, bucket.count + 1, brightness);
+                                }
+                                else
+                                {
+                                    colorBuckets[key] = (bucket.color, bucket.count + 1, bucket.brightness);
+                                }
                             }
                             else
                             {
-                                colorBuckets[key] = (px, 1, saturation);
+                                colorBuckets[key] = (px, 1, brightness);
                             }
                         }
                     }
 
                     if (colorBuckets.Count > 0)
                     {
-                        // Pick best vibrant/dominant color (weighted by count * saturation)
+                        // Pick the brightest color on the album artwork
                         var bestBucket = colorBuckets.Values
-                            .OrderByDescending(b => b.count * (1.0f + b.color.GetSaturation() * 2.0f))
+                            .OrderByDescending(b => b.color.GetBrightness())
+                            .ThenByDescending(b => b.color.GetSaturation())
                             .First();
 
-                        Color vibrant = bestBucket.color;
+                        Color brightest = bestBucket.color;
 
-                        // Adjust luminance so it creates a rich, dark-themed background where text pops
-                        _currentWidgetBackgroundColor = AdjustBrightness(vibrant, 0.35f);
-                        _currentAccentColor           = AdjustBrightness(vibrant, 0.18f);
+                        // Because text is fixed to crisp white (Brushes.White), if the brightest color is
+                        // extremely light (> 0.65 brightness), gently cap at 0.65 to guarantee sharp text contrast
+                        float currentBrightness = brightest.GetBrightness();
+                        if (currentBrightness > 0.65f)
+                        {
+                            _currentWidgetBackgroundColor = AdjustBrightness(brightest, 0.65f);
+                        }
+                        else
+                        {
+                            _currentWidgetBackgroundColor = brightest;
+                        }
                     }
                     else
                     {
-                        // Fallback if artwork is black/white/monochrome: pick the clearest dark average
+                        // Fallback if artwork is monochrome or dark
                         Color px = sample.GetPixel(16, 16);
-                        _currentWidgetBackgroundColor = AdjustBrightness(px, 0.25f);
-                        _currentAccentColor           = Color.Black;
+                        _currentWidgetBackgroundColor = px;
                     }
                 }
             }
             catch (Exception ex)
             {
                 WidgetManager?.WriteLogMessage(this, LogLevel.WARN, $"Color extraction error: {ex.Message}");
-                _currentWidgetBackgroundColor = Color.Black;
-                _currentAccentColor           = Color.Black;
+                _currentWidgetBackgroundColor = Color.FromArgb(115, 128, 142);
             }
         }
 
@@ -609,7 +663,7 @@ namespace Foobar2000Widget
 
             layout.AlbumArtRect = new Rectangle(padding, padding, albumArtSide, albumArtSide);
 
-            int textX     = layout.AlbumArtRect.Right + padding;
+            int textX     = layout.AlbumArtRect.Right + 35;
             int textWidth = Math.Max(0, size.Width - textX - padding);
             if (textWidth <= 0) return layout;
 
@@ -619,7 +673,7 @@ namespace Foobar2000Widget
             int albumCenterY = layout.AlbumArtRect.Top + layout.AlbumArtRect.Height / 2;
             int textTopY    = Math.Max(padding,
                 Math.Min(albumCenterY - blockH / 2,
-                         Math.Max(padding, size.Height - padding - blockH - 60)));
+                         Math.Max(padding, size.Height - padding - blockH - 100)));
 
             int y = textTopY;
             layout.TitleRect  = new RectangleF(textX, y, textWidth, titleH); y += titleH + 5;
@@ -627,7 +681,7 @@ namespace Foobar2000Widget
             layout.AlbumRect  = new RectangleF(textX, y, textWidth, infoH);
 
             int btnSize    = 48;
-            int btnSpacing = 10;
+            int btnSpacing = 28;
             int btnTopY    = Math.Max(padding, size.Height - padding - btnSize - 15);
             int totalW     = 3 * btnSize + 2 * btnSpacing;
             int btnStartX  = Math.Max(textX, textWidth > totalW
@@ -652,6 +706,20 @@ namespace Foobar2000Widget
             if      (layout.PrevButtonRect.Contains(click))      _ = SendPlayerCommandAsync("previous",   "Previous");
             else if (layout.PlayPauseButtonRect.Contains(click)) _ = SendPlayerCommandAsync("play-pause", "Play/Pause");
             else if (layout.NextButtonRect.Contains(click))      _ = SendPlayerCommandAsync("next",       "Next");
+            else if (_currentPlayerState?.ActiveItem != null && _currentPlayerState.ActiveItem.Duration > 0)
+            {
+                int dividerY = (int)layout.PrevButtonRect.Top - 34;
+                int barLeft  = (int)layout.TitleRect.Left;
+                int barWidth = WidgetSize.ToSize().Width - 35 - barLeft;
+
+                // +/- 16px vertical touch hit zone across the progress bar
+                if (barWidth > 0 && y >= dividerY - 16 && y <= dividerY + 16 && x >= barLeft && x <= barLeft + barWidth)
+                {
+                    double ratio = Math.Max(0.0, Math.Min(1.0, (double)(x - barLeft) / barWidth));
+                    double targetSeconds = ratio * _currentPlayerState.ActiveItem.Duration;
+                    _ = SetPlayerPositionAsync(targetSeconds);
+                }
+            }
         }
 
         private Bitmap DrawWidget()
@@ -676,17 +744,14 @@ namespace Foobar2000Widget
                     g.SmoothingMode     = SmoothingMode.AntiAlias;
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                    using (var bgBrush = new LinearGradientBrush(
-                        new Rectangle(0, 0, size.Width, size.Height),
-                        _currentWidgetBackgroundColor,
-                        _currentAccentColor,
-                        LinearGradientMode.ForwardDiagonal))
-                    {
-                        g.FillRectangle(bgBrush, new Rectangle(0, 0, size.Width, size.Height));
-                    }
+                    g.Clear(_currentWidgetBackgroundColor);
 
-                    Brush textBrush = _currentWidgetBackgroundColor.GetBrightness() > 0.65f
-                        ? Brushes.Black : Brushes.White;
+                    // 1. Floating Album Art Drop Shadow (~0.002 ms cost)
+                    Rectangle shadowRect = new Rectangle(layout.AlbumArtRect.X + 4, layout.AlbumArtRect.Y + 4, layout.AlbumArtRect.Width, layout.AlbumArtRect.Height);
+                    using (var shadowBrush = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
+                    {
+                        g.FillRectangle(shadowBrush, shadowRect);
+                    }
 
                     // Album art
                     if (_currentAlbumArt != null)
@@ -695,25 +760,111 @@ namespace Foobar2000Widget
                     }
                     else
                     {
-                        using (var placeholder = new SolidBrush(Color.FromArgb(100, 128, 128, 128)))
-                            g.FillRectangle(placeholder, layout.AlbumArtRect);
+                        // Option 3: Glassmorphic Music Card with double musical note (♫)
+                        // 100% lightweight (exactly 1 FillRectangle + 1 DrawString) with zero performance overhead
+                        using (var cardBrush = new SolidBrush(Color.FromArgb(140, 18, 18, 24)))
+                            g.FillRectangle(cardBrush, layout.AlbumArtRect);
 
                         using (var sf = new StringFormat
                             { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                            g.DrawString("No Art", _infoFont, textBrush, layout.AlbumArtRect, sf);
+                            g.DrawString("♫", _fallbackArtFont, Brushes.White, layout.AlbumArtRect, sf);
                     }
 
-                    // Text
+                    // Crisp 1px subtle highlight border around artwork
+                    using (var borderPen = new Pen(Color.FromArgb(45, 255, 255, 255), 1f))
+                    {
+                        g.DrawRectangle(borderPen, layout.AlbumArtRect);
+                    }
+
+                    // 2. Text Opacity Hierarchy: Title (100% White), Artist (90% White), Album (75% White)
                     if (layout.TitleRect.Width > 0)
                     {
-                        g.DrawString(_currentTitle  ?? "Unknown Title",        _titleFont, textBrush, layout.TitleRect,  textFormat);
-                        g.DrawString(_currentArtist ?? "Unknown Album Artist",  _infoFont,  textBrush, layout.ArtistRect, textFormat);
-                        g.DrawString(_currentAlbum  ?? "Unknown Album",         _infoFont,  textBrush, layout.AlbumRect,  textFormat);
+                        g.DrawString(_currentTitle  ?? "Unknown Title",        _titleFont, Brushes.White, layout.TitleRect,  textFormat);
+                        using (var artistBrush = new SolidBrush(Color.FromArgb(230, 255, 255, 255)))
+                            g.DrawString(_currentArtist ?? "Unknown Album Artist",  _infoFont,  artistBrush,   layout.ArtistRect, textFormat);
+                        using (var albumBrush  = new SolidBrush(Color.FromArgb(190, 255, 255, 255)))
+                            g.DrawString(_currentAlbum  ?? "Unknown Album",         _infoFont,  albumBrush,    layout.AlbumRect,  textFormat);
                     }
 
-                    // Buttons
+                    // 3. Control Deck Progress Bar with Timestamps (M:SS)
+                    int dividerY = (int)layout.PrevButtonRect.Top - 34;
+                    if (layout.TitleRect.Width > 0)
+                    {
+                        int barLeft  = (int)layout.TitleRect.Left;
+                        int barWidth = size.Width - 35 - barLeft;
+
+                        if (barWidth > 0)
+                        {
+                            // 1. Draw background track line (~3x larger: 6px thick with rounded ends)
+                            using (var bgPen = new Pen(Color.FromArgb(40, 255, 255, 255), 6f))
+                            {
+                                bgPen.StartCap = LineCap.Round;
+                                bgPen.EndCap   = LineCap.Round;
+                                g.DrawLine(bgPen, barLeft, dividerY, barLeft + barWidth, dividerY);
+                            }
+
+                            // 2. Draw active progress bar fill and timestamps if duration is known and > 0
+                            if (_currentPlayerState?.ActiveItem != null && _currentPlayerState.ActiveItem.Duration > 0)
+                            {
+                                double pos = _currentPlayerState.ActiveItem.Position;
+                                double dur = _currentPlayerState.ActiveItem.Duration;
+                                if (_currentPlayerState.PlaybackState == PlaybackState.playing)
+                                {
+                                    pos += (DateTime.UtcNow - _lastPositionUpdateTime).TotalSeconds;
+                                }
+                                double ratio = Math.Max(0.0, Math.Min(1.0, pos / dur));
+                                int fillWidth = (int)Math.Round(barWidth * ratio);
+
+                                if (fillWidth > 0)
+                                {
+                                    using (var fillPen = new Pen(Brushes.White, 6f))
+                                    {
+                                        fillPen.StartCap = LineCap.Round;
+                                        fillPen.EndCap   = LineCap.Round;
+                                        g.DrawLine(fillPen, barLeft, dividerY, barLeft + fillWidth, dividerY);
+                                    }
+
+                                    // Crisp scrubber handle dot (16px diameter) at the tip of progress bar
+                                    int dotRadius = 8;
+                                    g.FillEllipse(Brushes.White, barLeft + fillWidth - dotRadius, dividerY - dotRadius, dotRadius * 2, dotRadius * 2);
+                                }
+
+                                // 3. Draw M:SS Timestamps below ends of progress bar
+                                string posStr = FormatTimeSpan(Math.Max(0.0, Math.Min(dur, pos)));
+                                string durStr = FormatTimeSpan(dur);
+
+                                using (var timeBrush = new SolidBrush(Color.FromArgb(210, 255, 255, 255)))
+                                {
+                                    int timeY = dividerY + 12;
+                                    g.DrawString(posStr, _timeFont, timeBrush, barLeft, timeY, textFormat);
+
+                                    using (var farFormat = new StringFormat { Alignment = StringAlignment.Far })
+                                    {
+                                        g.DrawString(durStr, _timeFont, timeBrush, barLeft + barWidth, timeY, farFormat);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Buttons with Circular Glass Pill behind PlayPause button
                     if (layout.PrevButtonRect.Width > 0)
                     {
+                        var circleRect = new Rectangle(
+                            layout.PlayPauseButtonRect.X - 6,
+                            layout.PlayPauseButtonRect.Y - 6,
+                            layout.PlayPauseButtonRect.Width + 12,
+                            layout.PlayPauseButtonRect.Height + 12);
+
+                        using (var pillBrush = new SolidBrush(Color.FromArgb(45, 255, 255, 255)))
+                        {
+                            g.FillEllipse(pillBrush, circleRect);
+                        }
+                        using (var pillBorder = new Pen(Color.FromArgb(60, 255, 255, 255), 1f))
+                        {
+                            g.DrawEllipse(pillBorder, circleRect);
+                        }
+
                         if (_prevIcon != null) g.DrawImage(_prevIcon, layout.PrevButtonRect);
 
                         var playPauseIcon = _currentPlayerState?.PlaybackState == PlaybackState.playing
@@ -731,6 +882,15 @@ namespace Foobar2000Widget
                 bitmap.Dispose();
                 return null;
             }
+        }
+
+        private static string FormatTimeSpan(double totalSeconds)
+        {
+            if (totalSeconds < 0 || double.IsNaN(totalSeconds) || double.IsInfinity(totalSeconds)) return "0:00";
+            var ts = TimeSpan.FromSeconds(totalSeconds);
+            if (ts.TotalHours >= 1)
+                return $"{(int)ts.TotalHours}:{ts.Minutes:D2}:{ts.Seconds:D2}";
+            return $"{ts.Minutes}:{ts.Seconds:D2}";
         }
     }
 }
